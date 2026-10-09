@@ -1,4 +1,7 @@
 use cc::Build;
+#[cfg(windows)]
+#[path = "build_support/ffmpeg_software_deps.rs"]
+mod ffmpeg_software_deps;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -536,7 +539,33 @@ mod ffmpeg {
     }
 
     #[cfg(windows)]
-    fn emit_static_windows_ffmpeg_private_deps(root: &Path, seen_search_dirs: &mut Vec<PathBuf>) {
+    fn emit_static_windows_ffmpeg_private_deps(
+        root: &Path,
+        dependency_roots: &[PathBuf],
+        seen_search_dirs: &mut Vec<PathBuf>,
+    ) {
+        let mut metadata = String::new();
+        for directory in ["lib/pkgconfig", "lib64/pkgconfig", "share/pkgconfig"] {
+            let path = root.join(directory).join("libavcodec.pc");
+            emit_rerun_if_changed(&path);
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                metadata.push_str(&contents);
+                metadata.push('\n');
+            }
+        }
+        for name in crate::ffmpeg_software_deps::requested_software_h26x(&metadata) {
+            let prefixed = format!("lib{name}");
+            let names = [name, prefixed.as_str()];
+            let library = dependency_roots.iter().find_map(|candidate| {
+                find_library(candidate, &names, LocalLinkMode::Static)
+            });
+            let Some(library) = library else {
+                panic!("Selected FFmpeg requires optional software codec library {name}, but it was not found in the configured dependency roots");
+            };
+            println!("cargo:warning=Selected FFmpeg enables software H.26x dependency {name}; this is a private/custom build, not approved for public distribution under RustAdmin policy");
+            emit_link_search_once(seen_search_dirs, &library.lib_dir);
+            emit_local_library(&library);
+        }
         for names in [
             &["aom"][..],
             &["dav1d"][..],
@@ -561,10 +590,8 @@ mod ffmpeg {
             &["libwebpdecoder", "webpdecoder"][..],
             &["libwebp", "webp"][..],
             &["libsharpyuv", "sharpyuv"][..],
-            // Distributed RustAdmin builds intentionally exclude software
-            // H.264/H.265 encoders. Do not restore x264/x265 private link
-            // dependencies; use hardware/platform H.26x and AV1/VP9/VP8
-            // software fallback instead.
+            // Optional x264/x265/openh264 are linked above only when the
+            // selected FFmpeg's metadata requests them.
             &["libxml2s", "xml2"][..],
             &["iconv"][..],
             &["charset"][..],
@@ -709,6 +736,9 @@ mod ffmpeg {
     fn emit_pkg_config_lib(name: &str, static_ffmpeg: bool) {
         let normalized = name.trim_start_matches(':').trim_start_matches("lib");
         let normalized = normalized.strip_suffix(".a").unwrap_or(normalized);
+        if ["x264", "x265", "openh264", "kvazaar"].contains(&normalized) {
+            println!("cargo:warning=Selected FFmpeg enables software H.26x dependency {normalized}; this is a private/custom build, not approved for public distribution under RustAdmin policy");
+        }
         if static_ffmpeg && FFMPEG_CORE_LIBS.contains(&normalized) {
             println!("cargo:rustc-link-lib=static={normalized}");
         } else {
@@ -908,7 +938,7 @@ mod ffmpeg {
         emit_local_library(&mfx_compat_lib);
         if uses_static_ffmpeg {
             emit_static_windows_ffmpeg_deps();
-            emit_static_windows_ffmpeg_private_deps(&ffmpeg_root, &mut link_search_dirs);
+            emit_static_windows_ffmpeg_private_deps(&ffmpeg_root, &roots, &mut link_search_dirs);
         }
 
         let link_summary = match (

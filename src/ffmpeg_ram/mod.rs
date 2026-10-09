@@ -31,6 +31,8 @@ pub struct CodecInfo {
     pub format: DataFormat,
     pub priority: i32,
     pub hwdevice: AVHWDeviceType,
+    #[serde(default)]
+    pub high_quality: bool,
 }
 
 impl Default for CodecInfo {
@@ -41,6 +43,7 @@ impl Default for CodecInfo {
             format: DataFormat::H264,
             priority: Default::default(),
             hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
+            high_quality: false,
         }
     }
 }
@@ -68,6 +71,12 @@ impl CodecInfo {
 
     pub fn is_software_encoder_name(name: &str) -> bool {
         !Self::is_hardware_encoder_name(name)
+    }
+
+    pub fn supports_high_quality_profile(name: &str) -> bool {
+        Self::is_hardware_encoder_name(name)
+            && (name.ends_with("_nvenc") || name.ends_with("_videotoolbox"))
+            && (name.contains("h264") || name.contains("hevc"))
     }
 
     pub fn is_hardware_encoder(&self) -> bool {
@@ -146,6 +155,7 @@ impl CodecInfo {
                 format: H264,
                 hwdevice: AV_HWDEVICE_TYPE_NONE,
                 priority: Priority::Soft as _,
+                high_quality: false,
             }),
             h265: Some(CodecInfo {
                 name: "hevc".to_owned(),
@@ -153,6 +163,7 @@ impl CodecInfo {
                 format: H265,
                 hwdevice: AV_HWDEVICE_TYPE_NONE,
                 priority: Priority::Soft as _,
+                high_quality: false,
             }),
             vp8: None,
             vp9: None,

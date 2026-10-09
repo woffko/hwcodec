@@ -21,4 +21,9 @@ void av_log_set_level(int level);
 void hwcodec_set_av_log_callback();
 void hwcodec_set_flag_could_not_find_ref_with_poc();
 
+// Opaque registry queries do not create a codec or touch a GPU/driver.
+typedef struct AVCodec AVCodec;
+const AVCodec *avcodec_find_encoder_by_name(const char *name);
+const AVCodec *avcodec_find_decoder_by_name(const char *name);
+
 #endif

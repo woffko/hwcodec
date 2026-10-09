@@ -7,6 +7,35 @@ include!(concat!(env!("OUT_DIR"), "/ffmpeg_ffi.rs"));
 
 use serde_derive::{Deserialize, Serialize};
 
+/// Whether the loaded FFmpeg library registers this implementation. This is a
+/// build fact, not evidence that it can run on the current device.
+pub fn codec_registered(name: &str, encoder: bool) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    // SAFETY: CString supplies a live, NUL-terminated name for the synchronous
+    // FFmpeg registry lookup. The returned static pointer is only checked for
+    // null; it is never dereferenced or freed. Missing codecs return null.
+    unsafe {
+        if encoder {
+            !avcodec_find_encoder_by_name(name.as_ptr()).is_null()
+        } else {
+            !avcodec_find_decoder_by_name(name.as_ptr()).is_null()
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    #[test]
+    fn unknown_and_invalid_codec_names_are_not_registered() {
+        for encoder in [false, true] {
+            assert!(!super::codec_registered("rustadmin_missing_codec", encoder));
+            assert!(!super::codec_registered("h264\0invalid", encoder));
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum AVHWDeviceType {
     AV_HWDEVICE_TYPE_NONE,

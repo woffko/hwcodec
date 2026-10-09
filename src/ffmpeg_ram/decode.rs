@@ -369,6 +369,10 @@ impl Decoder {
         let bufav1 = &crate::common::DATA_AV1_720P[..];
 
         Self::probe_decoders_with(codecs, |codec| {
+            if !crate::ffmpeg::codec_registered(&codec.name, false) {
+                debug!("Decoder {} is not built into linked FFmpeg", codec.name);
+                return false;
+            }
             debug!(
                 "Testing decoder: {} (hwdevice: {:?})",
                 codec.name, codec.hwdevice

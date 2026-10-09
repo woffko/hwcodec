@@ -388,6 +388,13 @@ impl Encoder {
                 warn!("Rejecting unknown encoder candidate: {}", c.name);
                 return false;
             }
+            if !crate::ffmpeg::codec_registered(&c.name, true) {
+                debug!(
+                    "Skipping encoder candidate not registered by FFmpeg: {}",
+                    c.name
+                );
+                return false;
+            }
             let ctx = ctx.clone();
             if ctx.pixfmt == AVPixelFormat::AV_PIX_FMT_YUV420P && c.name.contains("qsv") {
                 return false;
@@ -409,19 +416,48 @@ impl Encoder {
                 }
 
                 debug!("Testing encoder: {}", codec.name);
-                match Self::probe_encoder(&codec, &ctx) {
-                    EncoderProbeStatus::Valid => {
-                        res.codecs.push(codec);
-                    }
-                    EncoderProbeStatus::TransientFailure => {
-                        res.transient_failure = true;
-                        warn!(
-                            "Encoder {} probe timed out waiting for first keyframe; not advertising until recheck",
-                            codec.name
+                let normal_status = Self::probe_encoder(&codec, &ctx);
+                let high_quality_status = if normal_status == EncoderProbeStatus::Valid
+                    && CodecInfo::supports_high_quality_profile(&codec.name)
+                {
+                    Some(Self::probe_encoder_with_quality(
+                        &codec,
+                        &ctx,
+                        Quality::Quality_High,
+                    ))
+                } else {
+                    None
+                };
+                if let Some(status) = high_quality_status {
+                    // A warming-up HQ encoder may work on the next bounded
+                    // retry. Do not persist its temporary absence as final.
+                    res.transient_failure |= status == EncoderProbeStatus::TransientFailure;
+                    if status != EncoderProbeStatus::Valid {
+                        debug!(
+                            "Encoder {} high-quality probe failed: {:?}; retaining normal capability",
+                            codec.name, status
                         );
                     }
-                    EncoderProbeStatus::HardFailure => {
-                        debug!("Encoder {} validation failed", codec.name);
+                }
+                if normal_status == EncoderProbeStatus::Valid {
+                    if let Some(codec) =
+                        Self::complete_encoder_probe(codec, normal_status, high_quality_status)
+                    {
+                        res.codecs.push(codec);
+                    }
+                } else {
+                    match normal_status {
+                        EncoderProbeStatus::TransientFailure => {
+                            res.transient_failure = true;
+                            warn!(
+                                "Encoder {} probe timed out waiting for first keyframe; not advertising until recheck",
+                                codec.name
+                            );
+                        }
+                        EncoderProbeStatus::HardFailure => {
+                            debug!("Encoder {} validation failed", codec.name);
+                        }
+                        EncoderProbeStatus::Valid => {}
                     }
                 }
             }
@@ -432,7 +468,32 @@ impl Encoder {
         res
     }
 
+    fn complete_encoder_probe(
+        mut codec: CodecInfo,
+        normal_status: EncoderProbeStatus,
+        high_quality_status: Option<EncoderProbeStatus>,
+    ) -> Option<CodecInfo> {
+        if normal_status != EncoderProbeStatus::Valid {
+            return None;
+        }
+        codec.high_quality = false;
+        if CodecInfo::supports_high_quality_profile(&codec.name)
+            && high_quality_status == Some(EncoderProbeStatus::Valid)
+        {
+            codec.high_quality = true;
+        }
+        Some(codec)
+    }
+
     fn probe_encoder(codec: &CodecInfo, base_ctx: &EncodeContext) -> EncoderProbeStatus {
+        Self::probe_encoder_with_quality(codec, base_ctx, base_ctx.quality)
+    }
+
+    fn probe_encoder_with_quality(
+        codec: &CodecInfo,
+        base_ctx: &EncodeContext,
+        quality: Quality,
+    ) -> EncoderProbeStatus {
         let c = EncodeContext {
             name: codec.name.clone(),
             mc_name: codec.mc_name.clone(),
@@ -441,6 +502,7 @@ impl Encoder {
             } else {
                 base_ctx.pixfmt
             },
+            quality,
             ..base_ctx.clone()
         };
         let yuv = match Encoder::dummy_yuv(c.clone()) {
@@ -539,6 +601,55 @@ impl Encoder {
         }
 
         Err(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nvenc_codec() -> CodecInfo {
+        CodecInfo {
+            name: "h264_nvenc".to_owned(),
+            format: H264,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn normal_probe_is_retained_when_high_quality_probe_fails() {
+        let mut candidate = nvenc_codec();
+        candidate.high_quality = true;
+        let codec = Encoder::complete_encoder_probe(
+            candidate,
+            EncoderProbeStatus::Valid,
+            Some(EncoderProbeStatus::HardFailure),
+        )
+        .expect("normal probe result should remain usable");
+
+        assert_eq!(codec.name, "h264_nvenc");
+        assert!(!codec.high_quality);
+    }
+
+    #[test]
+    fn successful_high_quality_probe_marks_the_normal_codec() {
+        let codec = Encoder::complete_encoder_probe(
+            nvenc_codec(),
+            EncoderProbeStatus::Valid,
+            Some(EncoderProbeStatus::Valid),
+        )
+        .expect("normal probe result should remain usable");
+
+        assert!(codec.high_quality);
+    }
+
+    #[test]
+    fn high_quality_cannot_replace_a_failed_normal_probe() {
+        assert!(Encoder::complete_encoder_probe(
+            nvenc_codec(),
+            EncoderProbeStatus::HardFailure,
+            Some(EncoderProbeStatus::Valid),
+        ).is_none());
     }
 }
 
